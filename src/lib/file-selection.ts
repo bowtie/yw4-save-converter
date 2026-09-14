@@ -1,5 +1,7 @@
 /** Identify Yo-kai Watch 4++ save files inside dropped folders. */
 
+import { isAutosave, parseSave } from "./converter";
+
 export interface DroppedFile {
   file: File;
   relativePath: string;
@@ -36,7 +38,7 @@ function pickCandidate(candidates: DroppedFile[]): DroppedFile | undefined {
 
 /**
  * Switch-side layouts:
- *  - emulator exports with one folder per save file: `USERDATA00/data.bin`
+ *  - one folder per save file: `USERDATA00/data.bin`
  *  - flat exports where the save files are named directly: `USERDATA00`
  */
 export function classifySwitchFiles(files: readonly DroppedFile[]): SaveSlotFiles {
@@ -130,4 +132,42 @@ function sameSlotBasename(kind: string, f: DroppedFile, slot: SlotName): boolean
 
 export function hasAnySlots(slots: SaveSlotFiles): boolean {
   return Boolean(slots.USERDATA00 || slots.AUTOSAVE || slots.HEADERSAVE || slots.SYSTEM);
+}
+
+/**
+ * Last-resort classification for bare `data.bin` files dropped without their
+ * slot folder (a lone `data.bin` carries no slot name in its path). The save
+ * structure gives it away: big saves (USERDATA00 / AUTOSAVE) hold 3+ sections
+ * while HEADERSAVE holds exactly one, and the section-0 manual-save flag
+ * (key 0xff73995b) separates USERDATA00 (1) from AUTOSAVE (0). Only the
+ * `data.bin` name exists on the Switch side, so these are treated as Switch
+ * files. Without the flag a big save is assumed to be USERDATA00.
+ */
+export async function sniffDataBinSlots(files: readonly DroppedFile[]): Promise<SaveSlotFiles> {
+  const out: SaveSlotFiles = {};
+  const bigSaves: DroppedFile[] = [];
+  let headersave: DroppedFile | undefined;
+  for (const f of files) {
+    const base = normalize(f.relativePath.split("/").pop() ?? "");
+    if (base !== "DATA.BIN") continue;
+    let parsed;
+    try {
+      parsed = parseSave(new Uint8Array(await f.file.arrayBuffer()));
+    } catch {
+      continue; // not a Yo-kai Watch save
+    }
+    if (parsed.sections.length >= 3) {
+      if (isAutosave(parsed) === true) {
+        if (!out.AUTOSAVE) out.AUTOSAVE = f;
+      } else {
+        bigSaves.push(f);
+      }
+    } else if (parsed.sections.length === 1 && !headersave) {
+      headersave = f;
+    }
+  }
+  const namedUserdata = bigSaves.find((f) => /USERDATA00/i.test(f.relativePath));
+  if (namedUserdata ?? bigSaves[0]) out.USERDATA00 = namedUserdata ?? bigSaves[0];
+  if (headersave) out.HEADERSAVE = headersave;
+  return out;
 }

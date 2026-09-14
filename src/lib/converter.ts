@@ -39,6 +39,9 @@ export const KEY_TZ_TABLE = 0x725ea090;
 /** Player name list: 36-byte UTF-8 slots. */
 export const KEY_PLAYER_NAMES = 0x3c823935;
 
+/** Section-0 flag: 1 in manual saves (USERDATA00), 0 in AUTOSAVE. */
+export const KEY_MANUAL_SAVE = 0xff73995b;
+
 export const NAME_SLOT_SIZE = 36;
 
 /** Minimum number of sections a big save (USERDATA00 / AUTOSAVE) must have. */
@@ -140,6 +143,13 @@ export function detectSide(parsed: ParsedSave): Side | "unknown" {
   if (tz.len === 1) return "ps4";
   if (tz.len > 4) return "switch";
   return "unknown";
+}
+
+/** True for AUTOSAVE saves, false for manual (USERDATA00); null if undetectable. */
+export function isAutosave(parsed: ParsedSave): boolean | null {
+  const rec = findRecord(parsed, 0, KEY_MANUAL_SAVE);
+  if (!rec || rec.len < 1) return null;
+  return parsed.data[rec.offset + 8] === 0;
 }
 
 /** First player name (36-byte UTF-8 slot) from the names record. */
@@ -410,18 +420,23 @@ export function buildConversion(input: BuildConversionInput): ConversionResult {
   );
   files.set(layout.userdata, user.output);
 
-  // AUTOSAVE: same skeleton family. Prefer real skeletons when provided and
-  // fall back to the donor's USERDATA00 when no autosave file was dropped.
-  const skelAuto = toPs4
-    ? (ps4Files.autosave ?? ps4Files.userdata ?? buildSkeleton("ps4"))
-    : (switchFiles.autosave ?? switchFiles.userdata ?? buildSkeleton("switch"));
-  const donAuto = toPs4 ? (switchFiles.autosave ?? donUser) : (ps4Files.autosave ?? donUser);
-  const auto = convertBigSave(skelAuto, donAuto);
-  log.push(
-    `AUTOSAVE: ${auto.stats.substituted} value(s) transplanted, ` +
-      `${(auto.stats.tailBytes / 1024 / 1024).toFixed(2)} MB of progress data copied.`,
-  );
-  files.set(layout.autosave, auto.output);
+  // AUTOSAVE: same skeleton family. Only converted from a real AUTOSAVE on
+  // the donor side — an autosave holds different progress from the manual
+  // slot, so it is never synthesized from USERDATA00.
+  const donAuto = toPs4 ? switchFiles.autosave : ps4Files.autosave;
+  if (donAuto) {
+    const skelAuto = toPs4
+      ? (ps4Files.autosave ?? ps4Files.userdata ?? buildSkeleton("ps4"))
+      : (switchFiles.autosave ?? switchFiles.userdata ?? buildSkeleton("switch"));
+    const auto = convertBigSave(skelAuto, donAuto);
+    log.push(
+      `AUTOSAVE: ${auto.stats.substituted} value(s) transplanted, ` +
+        `${(auto.stats.tailBytes / 1024 / 1024).toFixed(2)} MB of progress data copied.`,
+    );
+    files.set(layout.autosave, auto.output);
+  } else {
+    log.push("AUTOSAVE: skipped (no autosave file was provided).");
+  }
 
   // HEADERSAVE: wholesale copy from the donor (byte-aligned across platforms).
   const skelHead = toPs4 ? ps4Files.headersave : switchFiles.headersave;

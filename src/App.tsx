@@ -27,7 +27,12 @@ import {
   type ConversionResult,
   type Side,
 } from "./lib/converter";
-import { classifyAll, type SaveSlotFiles, type SlotName } from "./lib/file-selection";
+import {
+  classifyAll,
+  sniffDataBinSlots,
+  type SaveSlotFiles,
+  type SlotName,
+} from "./lib/file-selection";
 
 const SLOT_LABELS: Record<SlotName, string> = {
   USERDATA00: "Save slot",
@@ -56,38 +61,23 @@ async function inspectUserdata(
   }
 }
 
-function readmeFor(direction: "switch-to-ps4" | "ps4-to-switch"): string {
-  if (direction === "switch-to-ps4") {
-    return [
-      "Yo-kai Watch 4++ save conversion (Switch -> PS4)",
-      "",
-      "Your Switch progress, rebuilt as PS4 saves:",
-      "  USERDATAMOUNT/USERDATA00_data.bin",
-      "  USERDATAMOUNT/AUTOSAVE_data.bin",
-      "  USERDATAMOUNT/HEADERSAVE_data.bin",
-      "",
-      "1. Close the game.",
-      "2. Back up your current save folder.",
-      "3. Copy the USERDATAMOUNT folder over yours (replace files).",
-      "4. Start the game.",
-      "",
-      "If anything looks wrong, restore the backup you made in step 2.",
-    ].join("\n");
-  }
-  return [
-    "Yo-kai Watch 4++ save conversion (PS4 -> Switch)",
+function readmeFor(direction: "switch-to-ps4" | "ps4-to-switch", produced: string[]): string {
+  const toPs4 = direction === "switch-to-ps4";
+  const lines = [
+    `Yo-kai Watch 4++ save conversion (${toPs4 ? "Switch -> PS4" : "PS4 -> Switch"})`,
     "",
-    "Your PS4 progress, rebuilt as Switch saves:",
-    "  USERDATA00/data.bin",
-    "  AUTOSAVE/data.bin",
-    "  HEADERSAVE/data.bin",
+    `Your ${toPs4 ? "Switch" : "PS4"} progress, rebuilt as ${toPs4 ? "PS4" : "Switch"} saves:`,
+    ...[...produced].map((name) => `  ${name}`),
     "",
     "1. Close the game.",
     "2. Back up your current save folder.",
-    "3. Copy each folder over yours (replace files).",
+    "3. Copy the file(s) above over yours (replace).",
+    "4. Start the game.",
     "",
     "If anything looks wrong, restore the backup you made in step 2.",
-  ].join("\n");
+  ];
+  if (!toPs4) lines.splice(8, 1, "3. Copy each file into the matching folder of your save.");
+  return lines.join("\n");
 }
 
 export default function App() {
@@ -118,13 +108,24 @@ export default function App() {
   const handleFiles = useCallback(
     async (files: DroppedFile[]) => {
       const { switchSlots, ps4Slots, notes: foundNotes } = classifyAll(files);
+      const notes = [...foundNotes];
+      if (!switchSlots.USERDATA00 && !ps4Slots.USERDATA00) {
+        // Bare data.bin drops carry no slot folder name; sniff the contents.
+        const sniffed = await sniffDataBinSlots(files);
+        Object.assign(switchSlots, sniffed);
+        if (switchSlots.USERDATA00) {
+          notes.push(
+            "data.bin identified by its contents (no slot folder name); treated as Switch.",
+          );
+        }
+      }
       setHasFiles(true);
       resetOutput();
 
       if (!switchSlots.USERDATA00 && !ps4Slots.USERDATA00) {
         setSw(EMPTY_INFO());
         setPs4(EMPTY_INFO());
-        setNotes(foundNotes);
+        setNotes(notes);
         toast.create({
           type: "error",
           title: "No Yo-kai Watch save files found",
@@ -139,7 +140,7 @@ export default function App() {
       ]);
       setSw({ slots: switchSlots, ...swInfo });
       setPs4({ slots: ps4Slots, ...ps4Info });
-      setNotes(foundNotes);
+      setNotes(notes);
     },
     [resetOutput],
   );
@@ -173,11 +174,9 @@ export default function App() {
     direction = "ps4-to-switch";
   }
 
-  const canConvert =
-    direction !== null &&
-    directionError === null &&
-    Boolean(sw.slots.USERDATA00 && ps4.slots.USERDATA00) &&
-    !busy;
+  // One side is enough: the missing platform's structure comes from the
+  // built-in template.
+  const canConvert = direction !== null && directionError === null && !busy;
 
   const handleConvert = async () => {
     if (!direction) {
@@ -211,7 +210,10 @@ export default function App() {
         },
         direction,
       });
-      res.files.set("README.txt", new TextEncoder().encode(readmeFor(direction)));
+      res.files.set(
+        "README.txt",
+        new TextEncoder().encode(readmeFor(direction, [...res.files.keys()])),
+      );
       setResult(res);
       setFilename(direction === "switch-to-ps4" ? "ps4-save.zip" : "switch-save.zip");
       toast.create({ type: "success", title: "Converted! Download the ZIP below." });
